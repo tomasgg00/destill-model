@@ -1,0 +1,45 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.so
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Environment files
+env/
+venv/
+.myenv/
+.myenv.yml
+*.conda
+*.env
+*.sh
+
+# Models and large files
+models/
+*.safetensors
+*.pth
+*.pt
+*.h5
+*.ckpt
+
+# Data files
+*.csv
+*.tsv
+*.json
+*.xlsx
+data/
+evaluation_results/
+predictions/
+
+# Log files
+*.log
+pipeline.log
+
+# OS / IDE files
+.DS_Store
+.bash_history
+.vscode/
+.idea/
+
+models/
