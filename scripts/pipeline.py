@@ -1,4 +1,5 @@
-# scripts/run_pipeline.py
+
+# pipeline.py
 import os
 import argparse
 import subprocess
@@ -73,10 +74,13 @@ def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description="Run the Distilling Step-by-Step pipeline")
     parser.add_argument("--teacher_model", required=True, help="Path to your fine-tuned teacher model")
+    parser.add_argument("--base_model", default="t5-base", help="Base model for multi-task distillation")
     parser.add_argument("--data_path", required=True, help="Path to your dataset")
-    parser.add_argument("--output_dir", default="models/refugee_misinfo_distilled", help="Output directory for trained model")
-    parser.add_argument("--sample_size", type=int, default=5000, help="Number of examples to process (0 for all)")
+    parser.add_argument("--output_dir", default="models/distilled_stepbystep", help="Output directory for trained model")
+    parser.add_argument("--sample_size", type=int, default=None, help="Number of examples to process (None for all)")
     parser.add_argument("--skip_steps", type=str, default="", help="Comma-separated list of steps to skip (e.g., '1,2')")
+    parser.add_argument("--use_lora", action="store_true", help="Use LoRA for parameter-efficient fine-tuning")
+    parser.add_argument("--evaluation_only", action="store_true", help="Only run evaluation on existing models")
     args = parser.parse_args()
     
     # Create directories
@@ -86,7 +90,8 @@ def main():
     skip_steps = [int(s) for s in args.skip_steps.split(",") if s.strip().isdigit()]
     
     # Step 1: Generate rationales
-    if 1 not in skip_steps:
+    if 1 not in skip_steps and not args.evaluation_only:
+        sample_arg = ["--sample_size", str(args.sample_size)] if args.sample_size else []
         success = run_command(
             [
                 "python", "scripts/generate_rationales.py",
@@ -95,8 +100,7 @@ def main():
                 "--output_file", "data/with_rationales.jsonl",
                 "--text_column", "content",
                 "--batch_size", "1",
-                "--sample_size", str(args.sample_size)
-            ],
+            ] + sample_arg,
             "Generating rationales using teacher model"
         )
         if not success:
@@ -104,15 +108,15 @@ def main():
             return False
     
     # Step 2: Prepare dataset
-    if 2 not in skip_steps:
+    if 2 not in skip_steps and not args.evaluation_only:
         success = run_command(
             [
                 "python", "scripts/prepare_dataset.py",
                 "--input_file", "data/with_rationales.jsonl",
                 "--output_dir", "data/processed",
-                "--text_column", "text",
-                "--test_size", "0.1",
-                "--val_size", "0.1"
+                "--text_column", "content",
+                "--val_size", "0.1",
+                "--train_val_only"  # Only create train and val splits
             ],
             "Preparing dataset for training"
         )
@@ -120,54 +124,61 @@ def main():
             logger.error("Pipeline failed at step 2")
             return False
     
-    # Step 3: Train model
-    if 3 not in skip_steps:
+    # Step 3: Train multi-task model
+    if 3 not in skip_steps and not args.evaluation_only:
+        lora_arg = ["--use_lora"] if args.use_lora else []
         success = run_command(
             [
-                "python", "scripts/train_model.py",
-                "--model_path", "google/modernbert-base",
+                "python", "scripts/train_multitask_model.py",
+                "--model_path", args.base_model,
                 "--train_file", "data/processed/train.jsonl",
                 "--val_file", "data/processed/val.jsonl",
                 "--output_dir", args.output_dir,
                 "--num_epochs", "3",
                 "--batch_size", "8",
                 "--learning_rate", "2e-5",
-                "--use_lora"
-            ],
-            "Training model with multi-task learning"
+            ] + lora_arg,
+            "Training multi-task model with step-by-step distillation"
         )
         if not success:
             logger.error("Pipeline failed at step 3")
             return False
     
-    # Step 4: Evaluate model
+    # Step 4: Evaluate model on the test set
     if 4 not in skip_steps:
+        # Check if we have a separate test file
+        test_file = "data/processed/test.jsonl"
+        if not os.path.exists(test_file):
+            logger.warning(f"Test file {test_file} not found, using validation set for evaluation")
+            test_file = "data/processed/val.jsonl"
+        
         success = run_command(
             [
-                "python", "scripts/evaluate_model.py",
+                "python", "scripts/evaluate_multitask.py",
                 "--model_path", args.output_dir,
-                "--test_file", "data/processed/test.jsonl",
+                "--test_file", test_file,
                 "--output_dir", "evaluation_results",
                 "--batch_size", "8"
             ],
-            "Evaluating model"
+            "Evaluating multi-task model on test data"
         )
         if not success:
             logger.error("Pipeline failed at step 4")
             return False
     
-    # Step 5: Run inference on UNHCR validation set
+    # Step 5: Run inference on UNHCR validation set (if available)
     if 5 not in skip_steps:
         # Check if the file exists before running this step
         if os.path.exists("data/unhcr_validation.json"):
             success = run_command(
                 [
-                    "python", "scripts/inference.py",
+                    "python", "scripts/inference_multitask.py",
                     "--model_path", args.output_dir,
                     "--input_file", "data/unhcr_validation.json",
                     "--output_file", "predictions/unhcr_predictions.json",
                     "--text_column", "content",
-                    "--batch_size", "8"
+                    "--batch_size", "8",
+                    "--generate_both"  # Generate both labels and rationales
                 ],
                 "Running inference on UNHCR validation set"
             )

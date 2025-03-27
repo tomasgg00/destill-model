@@ -37,55 +37,55 @@ def create_cot_prompt(examples):
     return prompt
 
 def setup_teacher_model(model_path):
-    """Set up the teacher model with robust PEFT and LoRA support."""
+    """Set up the PEFT model with Llama 3.1 base and SafeTensors weights."""
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer, LlamaForSequenceClassification
+    from peft import PeftModel, PeftConfig, get_peft_model_state_dict
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from peft import PeftModel, PeftConfig, LoraConfig, get_peft_model
-
+    import os
+    
     print(f"Loading teacher model from {model_path}")
     
     try:
-        # Load adapter configuration
-        peft_config = PeftConfig.from_pretrained(model_path)
-        base_model_path = peft_config.base_model_name_or_path
+        # First, load the base model
+        base_model_name = "meta-llama/Llama-3.1-8B-Instruct"
         
-        print(f"Base model path: {base_model_path}")
-        
-        # Load base model with configuration matching your training
-        base_model = AutoModelForCausalLM.from_pretrained(
-            base_model_path,
+        # Load base model for sequence classification
+        base_model = LlamaForSequenceClassification.from_pretrained(
+            base_model_name,
             torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
             device_map="auto" if torch.cuda.is_available() else None,
-            num_labels=2,  # Matching your binary classification task
-            problem_type="single_label_classification"
+            num_labels=2  # Adjust based on your classification task
         )
-        
-        # Create LoRA configuration from the saved config
-        lora_config = LoraConfig(
-            r=peft_config.r,
-            lora_alpha=peft_config.lora_alpha,
-            lora_dropout=peft_config.lora_dropout,
-            target_modules=peft_config.target_modules,
-            task_type=peft_config.task_type,
-            modules_to_save=peft_config.modules_to_save
-        )
-        
-        # Prepare model for PEFT
-        model = get_peft_model(base_model, lora_config)
-        
-        # Load adapter weights
-        model = PeftModel.from_pretrained(base_model, model_path)
         
         # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(base_model_name)
         
-        # Set model to evaluation mode
+        # Verify adapter model file exists
+        adapter_model_path = os.path.join(model_path, "adapter_model.safetensors")
+        if not os.path.exists(adapter_model_path):
+            raise FileNotFoundError(f"Adapter model file not found at {adapter_model_path}")
+        
+        # Load adapter configuration
+        adapter_config = PeftConfig.from_pretrained(model_path)
+        
+        # Prepare the model with the adapter configuration
+        model = get_peft_model(base_model, adapter_config)
+        
+        # Load the SafeTensors weights
+        model.load_state_dict(
+            get_peft_model_state_dict(model, adapter_model_path), 
+            strict=False
+        )
+        
+        # Set to evaluation mode
         model.eval()
         
         return model, tokenizer
     
     except Exception as e:
-        print(f"Detailed error loading model: {e}")
+        print(f"Error loading model: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 def process_response(response, input_text):
@@ -255,22 +255,7 @@ def main():
             "text": "UNHCR reports that refugee children often face disruptions to their education, with only 68% enrolled in primary school compared to 90% of children globally, based on their 2023 education report.",
             "reasoning": "This statement makes specific claims about refugee children's education access, citing statistics and a source (UNHCR 2023 education report). Checking UNHCR's official publications confirms these figures are accurate representations of their educational access data. The text presents the information neutrally without attempting to manipulate or mislead. It provides relevant context about the educational challenges faced by refugee populations compared to global averages. There is no evidence of false information, manipulation of facts, or harmful framing in this statement.",
             "label": "TRUE"
-        },
-
-            # Additional TRUE examples
-        {
-            "text": "According to the EU Border Agency Frontex, the number of irregular border crossings into the European Union decreased by 13% in 2020 compared to 2019, reaching its lowest level since 2013.",
-            "reasoning": "This statement provides specific data from a credible source (EU Border Agency Frontex). The information about the decrease in irregular border crossings can be verified through official Frontex reports. The claim includes precise details (13% decrease, lowest since 2013) and presents the information in a neutral, factual manner without attempting to mislead. The statement does not omit crucial context or present the information in a biased way. This is an accurate representation of migration trends based on official data.",
-            "label": "TRUE"
-        },
-        
-        {
-            "text": "Many refugees who resettled in the United States have started small businesses that create jobs and contribute to local economies, with studies showing refugee entrepreneurship rates exceed the national average.",
-            "reasoning": "This statement is supported by research from organizations like the Fiscal Policy Institute and New American Economy, which have documented higher rates of entrepreneurship among refugees compared to native-born Americans. Multiple studies confirm that refugee-owned businesses create jobs and contribute to local economic growth. The claim does not exaggerate the positive impact and presents a factual assessment of refugee economic contributions. The information is presented without misleading framing and aligns with established economic research findings.",
-            "label": "TRUE"
         }
-
-        
     ]
     
     # Create prompt template

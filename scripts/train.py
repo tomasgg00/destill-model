@@ -1,4 +1,5 @@
-# scripts/train_model.py
+#!/usr/bin/env python
+# scripts/train.py
 import os
 import argparse
 import logging
@@ -8,7 +9,7 @@ from transformers import (
     AutoModelForSeq2SeqLM, 
     AutoTokenizer, 
     Seq2SeqTrainingArguments, 
-    Seq2SeqTrainer, 
+    Seq2SeqTrainer,
     DataCollatorForSeq2Seq,
     set_seed
 )
@@ -23,10 +24,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def preprocess_for_multitask(examples, tokenizer, max_length=512):
-    """Preprocess examples for multi-task training."""
+    """Preprocess examples for multi-task training - both label and rationale tasks."""
     # Create prompts for label task
     label_prompts = [f"[label] {text}" for text in examples["content"]]
-    label_outputs = examples["label"]
+    
+    # Process label format for outputs
+    label_outputs = []
+    for label in examples["label"]:
+        if isinstance(label, str):
+            # Keep the label as is if it's already in string format
+            label_outputs.append(label)
+        else:
+            # If it's a boolean or numeric value, convert to string format
+            label_outputs.append("TRUE (Factual)" if label else "FALSE (Misinformation)")
     
     # Create prompts for rationale task
     rationale_prompts = [f"[rationale] {text}" for text in examples["content"]]
@@ -65,7 +75,7 @@ def preprocess_for_multitask(examples, tokenizer, max_length=512):
 
 def main():
     parser = argparse.ArgumentParser(description="Train a model with step-by-step distillation")
-    parser.add_argument("--model_path", type=str, default="google/modernbert-base", help="Path to the base model or fine-tuned model")
+    parser.add_argument("--model_path", type=str, default="t5-base", help="Path to the base model")
     parser.add_argument("--train_file", type=str, required=True, help="Path to the training data")
     parser.add_argument("--val_file", type=str, default=None, help="Path to the validation data (optional)")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save the trained model")
@@ -77,6 +87,10 @@ def main():
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha parameter")
     parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
     parser.add_argument("--random_seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--label_weight", type=float, default=1.0, help="Weight for label prediction task (not used in this script)")
+    parser.add_argument("--rationale_weight", type=float, default=1.0, help="Weight for rationale generation task (not used in this script)")
+    parser.add_argument("--true_class_weight", type=float, default=1.0, 
+                        help="Extra weight for TRUE class examples (for imbalanced datasets)")
     args = parser.parse_args()
     
     # Set random seed
@@ -93,6 +107,47 @@ def main():
     if args.val_file:
         logger.info(f"Loading validation data from {args.val_file}")
         val_df = pd.read_json(args.val_file, lines="jsonl" in args.val_file) if args.val_file.endswith((".json", ".jsonl")) else pd.read_csv(args.val_file)
+    
+    # Apply class weighting if requested
+    if args.true_class_weight > 1.0:
+        logger.info(f"Applying class weighting: TRUE class weight = {args.true_class_weight}")
+        
+        # Function to standardize labels for consistent processing
+        def standardize_label(label):
+            if isinstance(label, str):
+                if "TRUE" in label.upper() or "FACTUAL" in label.upper():
+                    return "TRUE"
+                else:
+                    return "FALSE"
+            else:
+                # If it's a boolean or numeric value
+                return "TRUE" if label else "FALSE"
+        
+        # Count classes to report distribution
+        train_df["std_label"] = train_df["label"].apply(standardize_label)
+        true_count = (train_df["std_label"] == "TRUE").sum()
+        false_count = (train_df["std_label"] == "FALSE").sum()
+        
+        logger.info(f"Label distribution: TRUE={true_count} ({true_count/(true_count+false_count)*100:.1f}%), "
+                   f"FALSE={false_count} ({false_count/(true_count+false_count)*100:.1f}%)")
+        
+        # Duplicate TRUE examples to increase their weight
+        if args.true_class_weight > 1.0 and true_count < false_count:
+            # Find TRUE examples
+            true_samples = train_df[train_df["std_label"] == "TRUE"]
+            
+            # Calculate how many additional copies we need (ceiling of weight - 1)
+            additional_copies = int(args.true_class_weight - 1)
+            if additional_copies > 0:
+                additional_samples = pd.concat([true_samples] * additional_copies)
+                train_df = pd.concat([train_df, additional_samples])
+                train_df = train_df.sample(frac=1, random_state=args.random_seed)  # Shuffle
+                
+                logger.info(f"Added {len(additional_samples)} additional TRUE examples")
+                logger.info(f"New training set size: {len(train_df)} examples")
+        
+        # Remove temporary column
+        train_df = train_df.drop(columns=["std_label"])
     
     # Load model and tokenizer
     logger.info(f"Loading model from {args.model_path}")
@@ -154,7 +209,7 @@ def main():
         fp16=True,
         logging_dir=os.path.join(args.output_dir, "logs"),
         logging_steps=10,
-        report_to="tensorboard"
+        report_to="none"  # Disable tensorboard to avoid dependency issues
     )
     
     # Initialize trainer
@@ -168,16 +223,15 @@ def main():
     )
     
     # Train model
-    logger.info("Starting training...")
+    logger.info("Starting multi-task training for both label and rationale prediction...")
     trainer.train()
     
     # Save model
     logger.info(f"Saving model to {args.output_dir}")
-    trainer.save_model(args.output_dir)
+    model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
     
     logger.info("Training completed!")
 
 if __name__ == "__main__":
     main()
-    
